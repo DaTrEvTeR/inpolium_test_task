@@ -28,7 +28,6 @@ python main.py
 - beautifulsoup4(parsing html)
 - lxml(parser for bs4)
 - aiosqlite(async word with database)
-- selenium(get js generated items href)
 
 ## author
 
