@@ -30,6 +30,7 @@ python main.py
 
 The project uses the following dependencies:
 
+**Python**: 3.12 at least
 **aiohttp**: Asynchronous requests to the website  
 **beautifulsoup4**: Parsing HTML content  
 **lxml**: Parser for BeautifulSoup  
