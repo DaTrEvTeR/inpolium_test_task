@@ -1,8 +1,12 @@
-# Test task for Inpolium Data
+# **Test Task for Inpolium Data**
 
-## install
+This project is a **web scraper** designed to parse all products from [igefa Store](https://store.igefa.de/). It includes an **intermediate dataset** to ensure that the scraper can resume from where it left off, preventing loss of progress.
 
-To install all project dependencies use poetry:
+---
+
+## **Installation**
+
+Make sure you have [Poetry](https://python-poetry.org/) installed. To install all project dependencies, run:
 
 ```shell
 poetry install
@@ -24,13 +28,17 @@ python main.py
 
 ## Dependencies
 
-- aiohttp(async requests to website)
-- beautifulsoup4(parsing html)
-- lxml(parser for bs4)
-- aiosqlite(async word with database)
+The project uses the following dependencies:
+
+**aiohttp**: Asynchronous requests to the website  
+**beautifulsoup4**: Parsing HTML content  
+**lxml**: Parser for BeautifulSoup  
+**aiosqlite**: Asynchronous SQLite database operations
 
 ## author
 
-[Mykhailo Rozhkov](https://github.com/DaTrEvTeR)  
-telegram: @datrevter  
-mail: rozhkovm176@gmail.com
+### Mykhailo Rozhkov
+
+[LinkedIn](https://github.com/DaTrEvTeR)  
+[Telegram](https://t.me/datrevter)  
+Email: rozhkovm176@gmail.com

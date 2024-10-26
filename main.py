@@ -56,8 +56,8 @@ async def process_category(category_url: str, start_page: int, db: Database) -> 
     """
     category_code = category_url.split("/")[-1]
     category_name = category_url.split("/")[-2]
-    page_count = 2
-    # page_count = await get_category_page_count(category_api_url)
+    category_api_url = f"{BASE_API_URL}filter%5Btaxonomy%5D={category_code}&limit=0"
+    page_count = await get_category_page_count(category_api_url)
 
     for page_num in range(start_page, page_count + 1):
         await asyncio.sleep(5)
@@ -74,8 +74,6 @@ async def process_category(category_url: str, start_page: int, db: Database) -> 
                 products_data.append(product_data)
 
             await save_to_csv(category_name, page_num, products_data)
-            await db.clear_processed_urls(category_code, page_num)
-            await db.save_state(category_url, page_num)
         except Exception as e:
             logging.error(
                 f"Error processing category {category_code}, page {page_num}: {e}"
@@ -330,6 +328,18 @@ async def save_to_csv(category_name: str, page_num: int, data: list[dict]) -> No
         writer.writerows(data)
 
 
+async def save_all_to_csv(db: Database) -> None:
+    """Save all product data from the database (excluding 'category' and 'page') to a CSV file."""
+    file_path = "data/all_data.csv"
+
+    rows, columns = await db.get_all_from_db()
+
+    with open(file_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows([dict(zip(columns, row)) for row in rows])
+
+
 async def main() -> None:
     """Main function to initialize the database and process product categories.
 
@@ -345,17 +355,14 @@ async def main() -> None:
     categories = await get_categories()
 
     for category_url in categories:
-        if last_category and category_url != last_category:
+        if last_category and category_url.split("/")[-1] != last_category:
             continue
-        await process_category(category_url, last_page + 1, db)
-        next_category = (
-            (categories[categories.index(last_category) + 1])
-            if last_category != categories[-1]
-            else ""
-        )
-        last_category, last_page = await db.save_state(
-            category_url=next_category, page_num=0
-        )
+        await process_category(category_url, int(last_page), db)
+        last_category = ""
+        last_page = 1
+
+    await save_all_to_csv(db)
+    await db.clear_processed_urls()
 
 
 if __name__ == "__main__":

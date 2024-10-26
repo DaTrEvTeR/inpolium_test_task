@@ -14,14 +14,8 @@ class Database:
         """Initialize the database and create necessary tables"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS state (
-                    id INTEGER PRIMARY KEY,
-                    category_url TEXT,
-                    page_num INTEGER
-                )
-            """)
-            await db.execute("""
                 CREATE TABLE IF NOT EXISTS processed_products (
+                    id INTEGER PRIMARY KEY,
                     product_name TEXT,
                     original_data_column_1 TEXT,
                     original_data_column_2 TEXT,
@@ -30,7 +24,7 @@ class Database:
                     article_number TEXT,
                     product_description TEXT,
                     supplier TEXT,
-                    supplier_url PRIMARY KEY,
+                    supplier_url TEXT,
                     product_image_url TEXT,
                     manufacturer TEXT,
                     original_data_column_3 TEXT,
@@ -51,33 +45,13 @@ class Database:
         """
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT category_url, page_num FROM state WHERE id = 1"
+                """SELECT category, page
+                FROM processed_products
+                WHERE id = (SELECT MAX(id) FROM processed_products);
+                """
             ) as cursor:
                 row = await cursor.fetchone()
-                logging.info(f"Retrieved last state: {row}")
-                return row if row else (None, 0)
-
-    async def save_state(self, category_url: str, page_num: int) -> tuple[str, int]:
-        """Save the current state of processing.
-
-        Parameters
-        ----------
-        category_url : str
-            The URL of the category.
-        page_num : int
-            The current page number.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO state (id, category_url, page_num)
-                VALUES (1, ?, ?)
-            """,
-                (category_url, page_num),
-            )
-            await db.commit()
-        logging.info(f"Saved state: {category_url}, page: {page_num}")
-        return (category_url, page_num)
+        return row if row else (None, 1)
 
     async def get_processed_products(self, category_code, page_num) -> list[dict]:
         """Return a list of processed product data as dictionaries.
@@ -119,6 +93,29 @@ class Database:
                     logging.info("No processed products found.")
                     return []
 
+    async def get_all_from_db(self) -> tuple[list[tuple[str]], list[str]]:
+        """Retrieve all product data from the 'processed_products' table.
+
+        Returns
+        -------
+        tuple[list[tuple[str]], list[str]]
+            A tuple containing two elements:
+            1. A list of tuples, where each tuple represents a row from the database.
+            2. A list of strings, representing the column names of the table.
+        """
+        query = """SELECT
+            product_name, original_data_column_1, original_data_column_2,
+            supplier_article_number, ean, article_number, product_description,
+            supplier, supplier_url, product_image_url, manufacturer, original_data_column_3
+            FROM processed_products
+        """
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+        return rows, columns
+
     async def add_to_processed(
         self, product: dict[str, str], category: str, page: str
     ) -> None:
@@ -147,7 +144,7 @@ class Database:
             f"Added to processed: {product['supplier_url']}, category: {category}, page: {page}"
         )
 
-    async def clear_processed_urls(self, category: str, page: int) -> None:
+    async def clear_processed_urls(self) -> None:
         """Delete all records from the processed_products table for a specific category and page.
 
         Parameters
@@ -158,9 +155,6 @@ class Database:
             The page number.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "DELETE FROM processed_products WHERE category = ? AND page = ?",
-                (category, page),
-            )
+            await db.execute("DELETE FROM processed_products")
             await db.commit()
-        logging.info(f"Cleared processed URLs for category: {category}, page: {page}")
+        logging.info("Cleared processed URLs")
