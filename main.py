@@ -60,7 +60,7 @@ async def process_category(category_url: str, start_page: int, db: Database) -> 
     page_count = await get_category_page_count(category_api_url)
 
     for page_num in range(start_page, page_count + 1):
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
         logging.info(f"Processing {category_name}, page {page_num}...")
         try:
             page_products = await get_page_products(category_code, page_num)
