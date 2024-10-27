@@ -144,7 +144,13 @@ def process_wrapper(args: tuple[list, asyncio.Semaphore, Database, str, int]):
         List of parsed product data from the processed page.
     """
     urls, semaphore, db, category_code, page_num = args
-    return asyncio.run(process_page(urls, semaphore, db, category_code, page_num))
+    return [
+        res
+        for res in asyncio.run(
+            process_page(urls, semaphore, db, category_code, page_num)
+        )
+        if not isinstance(res, Exception)
+    ]
 
 
 def split_urls(urls: list[str], n: int):
