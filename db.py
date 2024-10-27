@@ -33,7 +33,7 @@ class Database:
                 )
             """)
             await db.commit()
-        logging.info("Database initialized and tables created.")
+        logging.info("Database initialized")
 
     async def get_last_state(self) -> tuple[str, int]:
         """Get the last processed category URL and page number.
@@ -85,7 +85,7 @@ class Database:
                 if rows:
                     processed_products = [dict(row) for row in rows]
                     logging.info(
-                        f"Retrieved processed products: {[product['supplier_url'] for product in processed_products]}, "
+                        f"Retrieved already processed products from {category_code} page {page_num}, "
                         f"total: {len(processed_products)}"
                     )
                     return processed_products
@@ -117,7 +117,7 @@ class Database:
         return rows, columns
 
     async def add_to_processed(
-        self, product: dict[str, str], category: str, page: str
+        self, product: dict[str, str], category: str, page: int
     ) -> None:
         """Add a product URL to the processed products table.
 
@@ -132,7 +132,7 @@ class Database:
         """
         product_copy = product.copy()
         product_copy["category"] = category
-        product_copy["page"] = page
+        product_copy["page"] = str(page)
         placeholders = ", ".join(["?"] * len(product_copy))
         columns = ", ".join(product_copy.keys())
         query = f"INSERT INTO processed_products ({columns}) VALUES ({placeholders})"
@@ -140,9 +140,6 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(query, tuple(product_copy.values()))
             await db.commit()
-        logging.info(
-            f"Added to processed: {product['supplier_url']}, category: {category}, page: {page}"
-        )
 
     async def clear_processed_urls(self) -> None:
         """Delete all records from the processed_products table for a specific category and page.

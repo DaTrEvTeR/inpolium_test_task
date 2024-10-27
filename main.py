@@ -4,10 +4,19 @@ import csv
 import os
 import re
 import logging
+import sys
 
 from bs4 import BeautifulSoup
+from multiprocessing import Pool
 
-from constants import BASE_URL, BASE_API_URL, BASE_PRODUCT_URL, DATABASE
+
+from constants import (
+    BASE_URL,
+    BASE_API_URL,
+    BASE_PRODUCT_URL,
+    DATABASE,
+    PRODUCT_ON_PAGE_LIMIT,
+)
 from db import Database
 from custom_session import CustomSession
 
@@ -27,21 +36,184 @@ async def get_categories() -> list[str]:
     async with CustomSession() as session:
         try:
             async with session.get(BASE_URL) as response:
-                if response.status != 200:
+                if not response.ok:
                     raise aiohttp.ClientError(
-                        f"Ошибка {response.status}: {response.reason}"
+                        f"Error {response.status}: {response.reason}"
                     )
                 html = await response.text()
                 soup = BeautifulSoup(html, "lxml")
                 categories = soup.select(
                     "div.ant-col.ant-col-xs-24.ant-col-sm-12.ant-col-lg-7 a", limit=12
                 )
-                category_urls = [cat["href"] for cat in categories]
-                logging.info(f"Retrieved categories: {category_urls}")
+                category_urls: list[str] = [cat["href"] for cat in categories]
+                logging.info(
+                    f"Retrieved categories: {[cat.split('/')[-2] for cat in category_urls]}"
+                )
                 return category_urls
         except Exception as e:
             logging.error(f"Error retrieving categories: {e}")
-            return []
+            sys.exit(1)
+
+
+async def fetch_and_parse(
+    url: str,
+    semaphore: asyncio.Semaphore,
+    db: Database,
+    category_code: str,
+    page_num: int,
+    session: CustomSession,
+) -> dict[str, str]:
+    """Fetch the content of a URL and parse product data.
+
+    Parameters
+    ----------
+    url : str
+        The URL to fetch.
+    semaphore : asyncio.Semaphore
+        Semaphore to limit concurrent requests.
+    db : Database
+        Database instance for processing product data.
+    category_code : str
+        The category code of the product.
+    page_num : int
+        The page number for the product data.
+    session : aiohttp.ClientSession
+        The HTTP session for making requests.
+
+    Returns
+    -------
+    dict
+        Parsed product data.
+    """
+    async with semaphore:
+        async with session.get(url) as response:
+            if not response.ok:
+                raise aiohttp.ClientError(f"Error {response.status}: {response.reason}")
+            html = await response.text()
+    product_data = await parse_product_data(html, url)
+    await db.add_to_processed(product_data, category_code, page_num)
+    return product_data
+
+
+async def process_page(
+    urls: list[str],
+    semaphore: asyncio.Semaphore,
+    db: Database,
+    category_code: str,
+    page_num: int,
+):
+    """Process a list of URLs by fetching and parsing product data concurrently.
+
+    Parameters
+    ----------
+    urls : list of str
+        List of URLs to process.
+    semaphore : asyncio.Semaphore
+        Semaphore to limit concurrent requests.
+    db : Database
+        Database instance for processing product data.
+    category_code : str
+        The category code of the products.
+    page_num : int
+        The page number for the product data.
+
+    Returns
+    -------
+    list
+        List of parsed product data from all URLs.
+    """
+    async with CustomSession() as session:
+        tasks = [
+            fetch_and_parse(url, semaphore, db, category_code, page_num, session)
+            for url in urls
+        ]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def process_wrapper(args: tuple[list, asyncio.Semaphore, Database, str, int]):
+    """Wrapper function to run the async process_page function in a synchronous context.
+
+    Parameters
+    ----------
+    args : tuple
+        A tuple containing the URLs, semaphore, database instance, category code, and page number.
+
+    Returns
+    -------
+    list
+        List of parsed product data from the processed page.
+    """
+    urls, semaphore, db, category_code, page_num = args
+    return asyncio.run(process_page(urls, semaphore, db, category_code, page_num))
+
+
+def split_urls(urls: list[str], n: int):
+    """Split a list of URLs into smaller chunks.
+
+    Parameters
+    ----------
+    urls : list of str
+        List of URLs to split.
+    n : int
+        Number of chunks to create.
+
+    Returns
+    -------
+    list of list of str
+        A list containing the split chunks of URLs.
+    """
+    chunk_len = (len(urls) + n - 1) // n
+    return (
+        [urls[i : i + chunk_len] for i in range(0, len(urls), chunk_len)]
+        if chunk_len
+        else []
+    )
+
+
+def get_products_data_from_urls(
+    products_urls: list[str],
+    db: Database,
+    category_code: str,
+    page_num: int,
+    processes_count: int = 2,
+    process_max_connections: int = 4,
+) -> list[dict[str, str]]:
+    """Retrieve product data from a list of URLs using multiple processes.
+
+    Parameters
+    ----------
+    products_urls : list of str
+        List of product URLs to fetch data from.
+    db : Database
+        Database instance for processing product data.
+    category_code : str
+        The category code of the products.
+    page_num : int
+        The page number for the product data.
+    processes_count : int, optional
+        Number of processes to use for parallel fetching, by default 4.
+    process_max_connections : int, optional
+        Maximum number of concurrent connections per process, by default 2.
+
+    Returns
+    -------
+    list
+        Combined list of parsed product data from all processes.
+    """
+    semaphore = asyncio.Semaphore(process_max_connections)
+
+    url_groups = split_urls(urls=products_urls, n=processes_count)
+
+    with Pool(processes=processes_count) as pool:
+        results = pool.map(
+            process_wrapper,
+            [(group, semaphore, db, category_code, page_num) for group in url_groups],
+        )
+
+    res = []
+    for url_group in results:
+        res.extend(url_group)
+    return res
 
 
 async def process_category(category_url: str, start_page: int, db: Database) -> None:
@@ -56,28 +228,32 @@ async def process_category(category_url: str, start_page: int, db: Database) -> 
     """
     category_code = category_url.split("/")[-1]
     category_name = category_url.split("/")[-2]
-    category_api_url = f"{BASE_API_URL}filter%5Btaxonomy%5D={category_code}&limit=0"
+    category_api_url = f"{BASE_API_URL}limit=0&filter%5Btaxonomy%5D={category_code}"
     page_count = await get_category_page_count(category_api_url)
 
     for page_num in range(start_page, page_count + 1):
         await asyncio.sleep(1)
-        logging.info(f"Processing {category_name}, page {page_num}...")
+        logging.info(f"Processing {category_name}({category_code}), page {page_num}...")
         try:
             page_products = await get_page_products(category_code, page_num)
             products_data = await db.get_processed_products(category_code, page_num)
             products_urls = await get_products_urls(page_products, products_data)
-            html_pages = await fetch_all_products(products_urls)
 
-            for html, product_url in zip(html_pages, products_urls):
-                product_data = await parse_product_data(html, product_url)
-                await db.add_to_processed(product_data, category_code, str(page_num))
-                products_data.append(product_data)
+            products_data.extend(
+                get_products_data_from_urls(
+                    products_urls=products_urls,
+                    db=db,
+                    category_code=category_code,
+                    page_num=page_num,
+                )
+            )
 
             await save_to_csv(category_name, page_num, products_data)
         except Exception as e:
             logging.error(
                 f"Error processing category {category_code}, page {page_num}: {e}"
             )
+            sys.exit(1)
 
 
 async def get_category_page_count(category_api_url: str) -> int:
@@ -102,14 +278,16 @@ async def get_category_page_count(category_api_url: str) -> int:
                     )
                 data: dict = await response.json(encoding="utf-8")
                 products_in_category_count = data["total"]
-                total_pages = (products_in_category_count + 19) // 20
+                total_pages = (
+                    products_in_category_count + PRODUCT_ON_PAGE_LIMIT - 1
+                ) // PRODUCT_ON_PAGE_LIMIT
                 logging.info(
                     f"Total pages for category {category_api_url.split('=')[-1]}: {total_pages}"
                 )
                 return total_pages
         except Exception as e:
             logging.error(f"Error retrieving page count: {e}")
-            return 0
+            sys.exit(1)
 
 
 async def get_page_products(category_article: str, page_num: int) -> dict:
@@ -126,19 +304,21 @@ async def get_page_products(category_article: str, page_num: int) -> dict:
         The JSON response containing product data.
     """
     async with CustomSession() as session:
-        url = f"{BASE_API_URL}filter%5Btaxonomy%5D={category_article}&limit=20&page={page_num}"
+        url = f"{BASE_API_URL}filter%5Btaxonomy%5D={category_article}&limit={PRODUCT_ON_PAGE_LIMIT}&page={page_num}"
         try:
             async with session.get(url) as response:
-                if response.status != 200:
+                if not response.ok:
                     raise aiohttp.ClientError(
-                        f"Ошибка {response.status}: {response.reason}"
+                        f"Error {response.status}: {response.reason}"
                     )
                 res = await response.json()
-                logging.info(f"Gettedd data from {url}")
+                logging.info(f"Gettedd data from {category_article} page {page_num}")
                 return res
         except Exception as e:
-            logging.error(f"Error retrieving products from page {page_num}: {e}")
-            return {}
+            logging.error(
+                f"Error retrieving products from {category_article} page {page_num}: {e}"
+            )
+            sys.exit(1)
 
 
 async def get_products_urls(
@@ -164,57 +344,8 @@ async def get_products_urls(
         product_url = f"{BASE_PRODUCT_URL}{item['mainVariant']['slug']}/{item['mainVariant']['id']}"
         if product_url not in processsed_urls:
             result.append(product_url)
-    logging.info(f"Found product URLs: {result}, total: {len(result)}")
+    logging.info(f"Found product URLs on page: {len(result)}")
     return result
-
-
-async def fetch_all_products(
-    products_urls: list[str], max_connections: int = 5
-) -> list[str]:
-    """Fetch HTML for all product URLs concurrently.
-
-    Parameters
-    ----------
-    products_urls : list[str]
-        List of product URLs to fetch.
-    max_connections : int, optional
-        Maximum number of concurrent connections, by default 5.
-
-    Returns
-    -------
-    list[str]
-        List of HTML content for each product URL.
-    """
-    semaphore = asyncio.Semaphore(max_connections)
-    async with CustomSession() as session:
-        tasks = [fetch(semaphore, session, url) for url in products_urls]
-        return await asyncio.gather(*tasks)
-
-
-async def fetch(semaphore, session, url) -> str:
-    """Fetch the content of a given URL using an asynchronous HTTP GET request.
-
-    Parameters
-    ----------
-    semaphore : asyncio.Semaphore
-        A semaphore to limit the number of concurrent requests.
-    session : aiohttp.ClientSession
-        The session used to perform the HTTP request.
-    url : str
-        The URL to fetch.
-
-    Returns
-    -------
-    str
-        The HTML content of the requested URL.
-    """
-    async with semaphore:
-        async with session.get(url) as response:
-            if not response.ok:
-                raise aiohttp.ClientError(
-                    f"Ошибка {response.status}: {response.reason}"
-                )
-            return await response.text()
 
 
 async def parse_product_data(html: str, url: str) -> dict:
@@ -362,7 +493,7 @@ async def main() -> None:
         last_page = 1
 
     await save_all_to_csv(db)
-    await db.clear_processed_urls()
+    # await db.clear_processed_urls()
 
 
 if __name__ == "__main__":
